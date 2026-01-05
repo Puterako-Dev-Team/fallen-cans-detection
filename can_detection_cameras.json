@@ -1,0 +1,18 @@
+[
+  {
+    "source": "rtsp://root:vivo1234@192.168.2.223/live1s1.sdp",
+    "camera_id": 1
+  },
+  {
+    "source": "",
+    "camera_id": 2
+  },
+  {
+    "source": "",
+    "camera_id": 3
+  },
+  {
+    "source": "",
+    "camera_id": 4
+  }
+]
