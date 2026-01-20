@@ -274,17 +274,55 @@ class CameraPanel:
         # ✅ Fallen cans simple tracker
         fallen_tracks = {}           # {fallen_id: {cx, cy, last_seen_frame, stable_frames, alerted}}
         next_fallen_id = 1
-        FALLEN_STABLE_FRAMES = config.get('fallen_stable_frames', 5)
+        FALLEN_STABLE_FRAMES = config.get('fallen_stable_frames', 1)
         FALLEN_MAX_DISTANCE = config.get('dist_threshold', 60)
         fallen_class_name = config.get('fallen_class_name', None)
         FALLEN_CONF_THRESHOLD = config.get('fallen_conf_threshold', config.get('count_conf_threshold', 0.6))
         
         self.log(f"ROI Setup: Entry={ENTRY_LINE_Y}px, Exit={EXIT_LINE_Y}px, Active={ACTIVE_ZONE_TOP}-{ACTIVE_ZONE_BOTTOM}px", "INFO")
 
-        while self.is_running and self.cap.isOpened():
+        RECONNECT_DELAY = 5  # detik
+
+        while self.is_running:
+            # Cek koneksi, kalau cap belum ada atau sudah mati, lakukan reconnect
+            if self.cap is None or not self.cap.isOpened():
+                self.log("RTSP connection lost, trying to reconnect...", "WARNING")
+                try:
+                    if self.cap:
+                        self.cap.release()
+                except:
+                    pass
+
+                while self.is_running:
+                    self.cap = cv2.VideoCapture(source)
+                    if self.cap.isOpened():
+                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        self.cap.set(cv2.CAP_PROP_FPS, 30)
+                        self.log("RTSP reconnected successfully", "SUCCESS")
+                        # Cek sample frame untuk pastikan benar-benar dapat frame
+                        ret, sample_frame = self.cap.read()
+                        if ret:
+                            break
+                        else:
+                            self.cap.release()
+                            self.cap = None
+                    self.log("Reconnect failed, retrying...", "WARNING")
+                    time.sleep(RECONNECT_DELAY)
+                if not self.is_running:
+                    break
+                # Update frame size, dst, jika perlu
+
+            # Baca frame
             ret, frame = self.cap.read()
             if not ret:
-                break
+                self.log("Failed to read frame, will try to reconnect...", "WARNING")
+                try:
+                    self.cap.release()
+                except:
+                    pass
+                self.cap = None
+                time.sleep(1)
+                continue
 
             self.frame_count += 1
             alert_messages = []
@@ -299,7 +337,7 @@ class CameraPanel:
                 # imgsz=320,
                 # ini untuk deteksi jika pakai Video Mp4
                 iou=0.5,
-                imgsz=960,
+                imgsz=640,
                 verbose=False,
                 half=use_half,
                 device=device,
@@ -342,6 +380,24 @@ class CameraPanel:
                     class_name = result.names[cls_ids[i]]
                     is_cans = (class_name == config['class_name'])
                     is_fallen = (fallen_class_name is not None and class_name == fallen_class_name)
+                    
+                    # ✅ Hitung ukuran bounding box
+                    x1, y1, x2, y2 = xyxy[i]
+                    bbox_width = x2 - x1
+                    bbox_height = y2 - y1
+                    bbox_area = bbox_width * bbox_height
+                    
+                    # ✅ Filter: Skip jika bbox terlalu besar (kertas besar/background)
+                    max_width = config.get('max_bbox_width', 200)
+                    max_height = config.get('max_bbox_height', 200)
+                    max_area = config.get('max_bbox_area', 30000)
+                    min_area = config.get('min_bbox_area', 100)
+                    
+                    if bbox_width > max_width or bbox_height > max_height or bbox_area > max_area:
+                        continue  # Skip deteksi yang terlalu besar
+                    
+                    if bbox_area < min_area:
+                        continue  # Skip deteksi yang terlalu kecil (noise)
 
                     det = {
                         'bbox': tuple(xyxy[i]),
@@ -349,7 +405,10 @@ class CameraPanel:
                         'cy': int(cy_arr[i]),
                         'conf': float(confs[i]),
                         'is_green': bool(is_cans and count_mask[i]),
-                        'label': class_name,        # ✅ simpan nama kelas
+                        'label': class_name,
+                        'width': int(bbox_width),   # ✅ Simpan ukuran untuk debugging
+                        'height': int(bbox_height),
+                        'area': int(bbox_area),
                     }
                     all_detections.append(det)
                     
@@ -402,7 +461,7 @@ class CameraPanel:
                     
                     video_time = f"{int(self.frame_count/self.fps//60):02d}:{int(self.frame_count/self.fps%60):02d}"
                     alert_messages.append(
-                        f"🚨 ALERT: FALLEN CAN detected at Y={fdata['cy']}px | "
+                        f"🚨 ALERT: Trash Paper detected at Y={fdata['cy']}px | "
                         f"Frame: {self.frame_count}"
                     )
                     fdata['alerted'] = True
@@ -530,7 +589,7 @@ class CameraPanel:
             # ============================================
             # DETECT DROPPED CANS (Missing in active zone)
             # ============================================
-            GRACE_PERIOD = config.get('grace_period_frames', 45)  # ~1.5 detik toleransi
+            GRACE_PERIOD = config.get('grace_period_frames', 25)  # ~1.5 detik toleransi
             MIN_TRACKING_DURATION = config.get('min_tracking_duration', 10)  # Minimal 10 frame tracking
             
             to_remove = []
@@ -753,16 +812,21 @@ class ConfigDialog:
             ('Fallen Class Name:', 'fallen_class_name', current_config.get('fallen_class_name', 'fallen_cans')),  
             ('Conf Threshold:', 'conf_threshold', current_config['conf_threshold']),
             ('Count Conf Threshold:', 'count_conf_threshold', current_config['count_conf_threshold']),
-            ('Fallen Conf Threshold:', 'fallen_conf_threshold', current_config.get('fallen_conf_threshold', 0.4)),
+            ('Fallen Conf Threshold:', 'fallen_conf_threshold', current_config.get('fallen_conf_threshold', 0.75)),
             ('Distance Threshold:', 'dist_threshold', current_config['dist_threshold']),
             ('Alert Cooldown (frames):', 'alert_cooldown_frames', current_config['alert_cooldown_frames']),
             ('Display Scale:', 'display_scale', current_config['display_scale']),
             ('Debounce (frames):', 'debounce_frames', current_config.get('debounce_frames', 5)),  
             ('Lock Frames:', 'lock_frames', current_config.get('lock_frames', 2)), 
             ('Log Interval (frames):', 'log_interval_frames', current_config.get('log_interval_frames', 30)), 
-            ('Grace Period (frames):', 'grace_period_frames', current_config.get('grace_period_frames', 45)), 
+            ('Grace Period (frames):', 'grace_period_frames', current_config.get('grace_period_frames', 25)), 
             ('Min Tracking Duration:', 'min_tracking_duration', current_config.get('min_tracking_duration', 10)), 
-            ('Fallen Stable Frames:', 'fallen_stable_frames', current_config.get('fallen_stable_frames', 5)),      
+            ('Fallen Stable Frames:', 'fallen_stable_frames', current_config.get('fallen_stable_frames', 1)), 
+
+            ('Max BBox Width (px):', 'max_bbox_width', current_config.get('max_bbox_width', 200)),
+            ('Max BBox Height (px):', 'max_bbox_height', current_config.get('max_bbox_height', 200)),
+            ('Max BBox Area (px²):', 'max_bbox_area', current_config.get('max_bbox_area', 30000)),
+            ('Min BBox Area (px²):', 'min_bbox_area', current_config.get('min_bbox_area', 100)),
         ]
         
         self.vars = {}
@@ -795,7 +859,12 @@ class ConfigDialog:
                 'log_interval_frames': int(self.vars['log_interval_frames'].get()),  
                 'grace_period_frames': int(self.vars['grace_period_frames'].get()),
                 'min_tracking_duration': int(self.vars['min_tracking_duration'].get()),
-                'fallen_stable_frames': int(self.vars['fallen_stable_frames'].get()),       
+                'fallen_stable_frames': int(self.vars['fallen_stable_frames'].get()),   
+
+                'max_bbox_width': int(self.vars['max_bbox_width'].get()),
+                'max_bbox_height': int(self.vars['max_bbox_height'].get()),
+                'max_bbox_area': int(self.vars['max_bbox_area'].get()),
+                'min_bbox_area': int(self.vars['min_bbox_area'].get()),    
             }
             self.callback(new_config)
             self.dialog.destroy()
@@ -805,9 +874,9 @@ class ConfigDialog:
 
 class MainApp:
     config = {
-        'model_path': 'best.pt',
-        'class_name': 'cans',
-        'fallen_class_name': 'fallen_cans',  
+        'model_path': 'model-pav-yolo11.pt',
+        'class_name': 'full_paper',
+        'fallen_class_name': 'paper',  
         'conf_threshold': 0.4,
         'count_conf_threshold': 0.6,
         'dist_threshold': 120,
@@ -816,9 +885,14 @@ class MainApp:
         'debounce_frames': 15,
         'lock_frames': 5,
         'log_interval_frames': 30,  # Log interval untuk menghindari spam (30 frames = ~1 detik)
-        'grace_period_frames': 45,  # Toleransi sebelum alert (45 frames = ~1.5 detik)
+        'grace_period_frames': 25,  # Toleransi sebelum alert (45 frames = ~1.5 detik)
         'min_tracking_duration': 10, 
-        'fallen_stable_frames': 5,     
+        'fallen_stable_frames': 1,   
+
+        'max_bbox_width': 10000,      # Maksimal lebar bbox (pixels)
+        'max_bbox_height': 400,     # Maksimal tinggi bbox (pixels)
+        'max_bbox_area': 50000,     # Maksimal area bbox (pixels²)
+        'min_bbox_area': 100,
     }
     
     def __init__(self, root):
