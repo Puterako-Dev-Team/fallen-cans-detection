@@ -274,7 +274,7 @@ class CameraPanel:
         # ✅ Fallen cans simple tracker
         fallen_tracks = {}           # {fallen_id: {cx, cy, last_seen_frame, stable_frames, alerted}}
         next_fallen_id = 1
-        FALLEN_STABLE_FRAMES = config.get('fallen_stable_frames', 5)
+        FALLEN_STABLE_FRAMES = config.get('fallen_stable_frames', 2)
         FALLEN_MAX_DISTANCE = config.get('dist_threshold', 60)
         fallen_class_name = config.get('fallen_class_name', None)
         FALLEN_CONF_THRESHOLD = config.get('fallen_conf_threshold', config.get('count_conf_threshold', 0.6))
@@ -299,7 +299,7 @@ class CameraPanel:
                 # imgsz=320,
                 # ini untuk deteksi jika pakai Video Mp4
                 iou=0.5,
-                imgsz=960,
+                imgsz=640,
                 verbose=False,
                 half=use_half,
                 device=device,
@@ -530,7 +530,7 @@ class CameraPanel:
             # ============================================
             # DETECT DROPPED CANS (Missing in active zone)
             # ============================================
-            GRACE_PERIOD = config.get('grace_period_frames', 45)  # ~1.5 detik toleransi
+            GRACE_PERIOD = config.get('grace_period_frames', 25)  # ~1.5 detik toleransi
             MIN_TRACKING_DURATION = config.get('min_tracking_duration', 10)  # Minimal 10 frame tracking
             
             to_remove = []
@@ -760,9 +760,9 @@ class ConfigDialog:
             ('Debounce (frames):', 'debounce_frames', current_config.get('debounce_frames', 5)),  
             ('Lock Frames:', 'lock_frames', current_config.get('lock_frames', 2)), 
             ('Log Interval (frames):', 'log_interval_frames', current_config.get('log_interval_frames', 30)), 
-            ('Grace Period (frames):', 'grace_period_frames', current_config.get('grace_period_frames', 45)), 
+            ('Grace Period (frames):', 'grace_period_frames', current_config.get('grace_period_frames', 25)), 
             ('Min Tracking Duration:', 'min_tracking_duration', current_config.get('min_tracking_duration', 10)), 
-            ('Fallen Stable Frames:', 'fallen_stable_frames', current_config.get('fallen_stable_frames', 5)),      
+            ('Fallen Stable Frames:', 'fallen_stable_frames', current_config.get('fallen_stable_frames', 2)),      
         ]
         
         self.vars = {}
@@ -816,9 +816,9 @@ class MainApp:
         'debounce_frames': 15,
         'lock_frames': 5,
         'log_interval_frames': 30,  # Log interval untuk menghindari spam (30 frames = ~1 detik)
-        'grace_period_frames': 45,  # Toleransi sebelum alert (45 frames = ~1.5 detik)
+        'grace_period_frames': 25,  # Toleransi sebelum alert (25 frames = ~1 detik)
         'min_tracking_duration': 10, 
-        'fallen_stable_frames': 5,     
+        'fallen_stable_frames': 2,     
     }
     
     def __init__(self, root):
