@@ -191,6 +191,15 @@ class CameraPanel:
         base_class_name_l = base_class_name.lower()
         fallen_class_name_l = fallen_class_name.lower() if fallen_class_name else None
 
+        # ✅ PATCH: Mode optimasi - cek apakah perlu tracking normal cans
+        TRACK_NORMAL_CANS = config.get('track_normal_cans', True)
+        DISPLAY_NORMAL_CANS = config.get('display_normal_cans', True)
+        
+        if not TRACK_NORMAL_CANS:
+            self.log("🎯 OPTIMIZED MODE: Tracking fallen cans only", "SUCCESS")
+        else:
+            self.log("📊 FULL MODE: Tracking all cans + fallen detection", "INFO")
+
         # Load shared model
         try:
             model = ModelManager.get_model(config['model_path'])
@@ -274,7 +283,7 @@ class CameraPanel:
         # ✅ Fallen cans simple tracker
         fallen_tracks = {}           # {fallen_id: {cx, cy, last_seen_frame, stable_frames, alerted}}
         next_fallen_id = 1
-        FALLEN_STABLE_FRAMES = config.get('fallen_stable_frames', 2)
+        FALLEN_STABLE_FRAMES = config.get('fallen_stable_frames', 5)
         FALLEN_MAX_DISTANCE = config.get('dist_threshold', 60)
         fallen_class_name = config.get('fallen_class_name', None)
         FALLEN_CONF_THRESHOLD = config.get('fallen_conf_threshold', config.get('count_conf_threshold', 0.6))
@@ -359,6 +368,9 @@ class CameraPanel:
                     if is_fallen and det['conf'] >= FALLEN_CONF_THRESHOLD:
                         fallen_detections.append(det)
 
+            # ============================================
+            # FALLEN CANS TRACKING (PRIORITAS UTAMA!)
+            # ============================================
             for det in fallen_detections:
                 fx, fy = det['cx'], det['cy']
                 best_id = None
@@ -403,92 +415,115 @@ class CameraPanel:
                     video_time = f"{int(self.frame_count/self.fps//60):02d}:{int(self.frame_count/self.fps%60):02d}"
                     alert_messages.append(
                         f"🚨 ALERT: FALLEN CAN detected at Y={fdata['cy']}px | "
-                        f"Frame: {self.frame_count}"
+                        f"Frame: {self.frame_count} | Time: {video_time}"
                     )
                     fdata['alerted'] = True
                     total_dropped += 1  # hitung sebagai problem juga
 
-
             # ============================================
             # CONVEYOR BELT STATE MACHINE TRACKING
+            # ✅ PATCH: Skip jika mode fallen-only
             # ============================================
-            MAX_MISSING_FRAMES = config.get('debounce_frames', 10)
-            STABLE_FRAMES_REQUIRED = config.get('lock_frames', 3)
-            MAX_DISTANCE = config.get('dist_threshold', 60)
-            
-            num_detections = len(counted_centroids_list)
-            num_tracked = len(tracked_cans_stateful)
-            
-            if num_tracked > 0 and num_detections > 0:
-                # Build spatial grid
-                grid = {}
-                for can_id, can_data in tracked_cans_stateful.items():
-                    # Skip yang sudah exit/dropped
-                    if can_data['state'] in [STATE_EXITING, STATE_DROPPED]:
-                        continue
-                        
-                    gx = can_data['cx'] // GRID_SIZE
-                    gy = can_data['cy'] // GRID_SIZE
-                    grid_key = (gx, gy)
-                    
-                    if grid_key not in grid:
-                        grid[grid_key] = []
-                    grid[grid_key].append((can_id, can_data['cx'], can_data['cy']))
+            if TRACK_NORMAL_CANS:
+                MAX_MISSING_FRAMES = config.get('debounce_frames', 10)
+                STABLE_FRAMES_REQUIRED = config.get('lock_frames', 3)
+                MAX_DISTANCE = config.get('dist_threshold', 60)
                 
-                # Match detections
-                matched_tracked_ids = set()
-                matched_detection_indices = set()
+                num_detections = len(counted_centroids_list)
+                num_tracked = len(tracked_cans_stateful)
                 
-                for d_idx, (det_cx, det_cy) in enumerate(counted_centroids_list):
-                    det_gx = det_cx // GRID_SIZE
-                    det_gy = det_cy // GRID_SIZE
-                    
-                    best_match_id = None
-                    best_distance = MAX_DISTANCE
-                    
-                    for gx in range(det_gx - 1, det_gx + 2):
-                        for gy in range(det_gy - 1, det_gy + 2):
-                            grid_key = (gx, gy)
-                            if grid_key not in grid:
-                                continue
+                if num_tracked > 0 and num_detections > 0:
+                    # Build spatial grid
+                    grid = {}
+                    for can_id, can_data in tracked_cans_stateful.items():
+                        # Skip yang sudah exit/dropped
+                        if can_data['state'] in [STATE_EXITING, STATE_DROPPED]:
+                            continue
                             
-                            for can_id, can_cx, can_cy in grid[grid_key]:
-                                if can_id in matched_tracked_ids:
-                                    continue
-                                
-                                # Skip cans yang sudah dropped/exited
-                                if tracked_cans_stateful[can_id]['state'] in [STATE_DROPPED, STATE_EXITING]:
-                                    continue
-                                
-                                dist = ((det_cx - can_cx)**2 + (det_cy - can_cy)**2)**0.5
-                                if dist < best_distance:
-                                    best_distance = dist
-                                    best_match_id = can_id
-                    
-                    if best_match_id:
-                        # Update tracked can
-                        old_state = tracked_cans_stateful[best_match_id]['state']
-                        old_cy = tracked_cans_stateful[best_match_id]['cy']
+                        gx = can_data['cx'] // GRID_SIZE
+                        gy = can_data['cy'] // GRID_SIZE
+                        grid_key = (gx, gy)
                         
-                        tracked_cans_stateful[best_match_id].update({
-                                'cx': det_cx,
-                                'cy': det_cy,
+                        if grid_key not in grid:
+                            grid[grid_key] = []
+                        grid[grid_key].append((can_id, can_data['cx'], can_data['cy']))
+                    
+                    # Match detections
+                    matched_tracked_ids = set()
+                    matched_detection_indices = set()
+                    
+                    for d_idx, (det_cx, det_cy) in enumerate(counted_centroids_list):
+                        det_gx = det_cx // GRID_SIZE
+                        det_gy = det_cy // GRID_SIZE
+                        
+                        best_match_id = None
+                        best_distance = MAX_DISTANCE
+                        
+                        for gx in range(det_gx - 1, det_gx + 2):
+                            for gy in range(det_gy - 1, det_gy + 2):
+                                grid_key = (gx, gy)
+                                if grid_key not in grid:
+                                    continue
+                                
+                                for can_id, can_cx, can_cy in grid[grid_key]:
+                                    if can_id in matched_tracked_ids:
+                                        continue
+                                    
+                                    # Skip cans yang sudah dropped/exited
+                                    if tracked_cans_stateful[can_id]['state'] in [STATE_DROPPED, STATE_EXITING]:
+                                        continue
+                                    
+                                    dist = ((det_cx - can_cx)**2 + (det_cy - can_cy)**2)**0.5
+                                    if dist < best_distance:
+                                        best_distance = dist
+                                        best_match_id = can_id
+                        
+                        if best_match_id:
+                            # Update tracked can
+                            old_state = tracked_cans_stateful[best_match_id]['state']
+                            old_cy = tracked_cans_stateful[best_match_id]['cy']
+                            
+                            tracked_cans_stateful[best_match_id].update({
+                                    'cx': det_cx,
+                                    'cy': det_cy,
+                                    'last_seen_frame': self.frame_count,
+                                    'stable_frames': tracked_cans_stateful[best_match_id]['stable_frames'] + 1,
+                                    'missing_count': 0,  # RESET: Kembali terdeteksi
+                                    'was_missing': False
+                                })
+                            matched_tracked_ids.add(best_match_id)
+                            matched_detection_indices.add(d_idx)
+                    
+                    # Add new cans (unmatched detections in active zone)
+                    for d_idx, (cx, cy) in enumerate(counted_centroids_list):
+                        if d_idx not in matched_detection_indices:
+                            # Determine initial state based on position
+                            if cy < ENTRY_LINE_Y:
+                                initial_state = STATE_ENTERING
+                            elif cy > EXIT_LINE_Y:
+                                initial_state = STATE_EXITING  # Skip cans yang muncul di bawah
+                            else:
+                                initial_state = STATE_TRACKING
+                            
+                            tracked_cans_stateful[next_can_id] = {
+                                'cx': cx,
+                                'cy': cy,
                                 'last_seen_frame': self.frame_count,
-                                'stable_frames': tracked_cans_stateful[best_match_id]['stable_frames'] + 1,
-                                'missing_count': 0,  # RESET: Kembali terdeteksi
-                                'was_missing': False
-                            })
-                        matched_tracked_ids.add(best_match_id)
-                        matched_detection_indices.add(d_idx)
-                
-                # Add new cans (unmatched detections in active zone)
-                for d_idx, (cx, cy) in enumerate(counted_centroids_list):
-                    if d_idx not in matched_detection_indices:
-                        # Determine initial state based on position
+                               'first_seen_frame': self.frame_count,  # penting untuk MIN_TRACKING_DURATION
+                                'stable_frames': 1,
+                                'state': initial_state,
+                                'alerted': False,
+                                'missing_count': 0,
+                                'was_missing': False 
+                            }
+                            next_can_id += 1
+                else:
+                    # Bootstrap: add all detections
+                    for cx, cy in counted_centroids_list:
                         if cy < ENTRY_LINE_Y:
                             initial_state = STATE_ENTERING
                         elif cy > EXIT_LINE_Y:
-                            initial_state = STATE_EXITING  # Skip cans yang muncul di bawah
+                            initial_state = STATE_EXITING
                         else:
                             initial_state = STATE_TRACKING
                         
@@ -496,117 +531,100 @@ class CameraPanel:
                             'cx': cx,
                             'cy': cy,
                             'last_seen_frame': self.frame_count,
-                           'first_seen_frame': self.frame_count,  # penting untuk MIN_TRACKING_DURATION
+                            'first_seen_frame': self.frame_count,
                             'stable_frames': 1,
                             'state': initial_state,
                             'alerted': False,
-                            'missing_count': 0,
-                            'was_missing': False 
+                            'missing_count': 0, 
+                            'was_missing': False
                         }
                         next_can_id += 1
-            else:
-                # Bootstrap: add all detections
-                for cx, cy in counted_centroids_list:
-                    if cy < ENTRY_LINE_Y:
-                        initial_state = STATE_ENTERING
-                    elif cy > EXIT_LINE_Y:
-                        initial_state = STATE_EXITING
-                    else:
-                        initial_state = STATE_TRACKING
+                
+                # ============================================
+                # DETECT DROPPED CANS (Missing in active zone)
+                # ============================================
+                GRACE_PERIOD = config.get('grace_period_frames', 45)  # ~1.5 detik toleransi
+                MIN_TRACKING_DURATION = config.get('min_tracking_duration', 10)  # Minimal 10 frame tracking
+                
+                to_remove = []
+
+                use_missing_drop_alert = not bool(fallen_class_name)
+
+                for can_id, can_data in tracked_cans_stateful.items():
+                    frames_missing = self.frame_count - can_data['last_seen_frame']
+                    tracking_duration = can_data['last_seen_frame'] - can_data.get('first_seen_frame', can_data['last_seen_frame'])
                     
-                    tracked_cans_stateful[next_can_id] = {
-                        'cx': cx,
-                        'cy': cy,
-                        'last_seen_frame': self.frame_count,
-                        'first_seen_frame': self.frame_count,
-                        'stable_frames': 1,
-                        'state': initial_state,
-                        'alerted': False,
-                        'missing_count': 0, 
-                        'was_missing': False
-                    }
-                    next_can_id += 1
-            
-            # ============================================
-            # DETECT DROPPED CANS (Missing in active zone)
-            # ============================================
-            GRACE_PERIOD = config.get('grace_period_frames', 25)  # ~1.5 detik toleransi
-            MIN_TRACKING_DURATION = config.get('min_tracking_duration', 10)  # Minimal 10 frame tracking
-            
-            to_remove = []
-
-            use_missing_drop_alert = not bool(fallen_class_name)
-
-            for can_id, can_data in tracked_cans_stateful.items():
-                frames_missing = self.frame_count - can_data['last_seen_frame']
-                tracking_duration = can_data['last_seen_frame'] - can_data.get('first_seen_frame', can_data['last_seen_frame'])
-                
-                # Skip yang sudah exiting (normal case)
-                if can_data['state'] == STATE_EXITING:
-                    if frames_missing > MAX_MISSING_FRAMES:
-                        to_remove.append(can_id)
-                    continue
-                
-                # Update missing count untuk can yang sedang tracking
-                if can_data['state'] == STATE_TRACKING and frames_missing > 0:
-                    if not can_data.get('was_missing', False):
-                        can_data['missing_count'] = can_data.get('missing_count', 0) + 1
-                        can_data['was_missing'] = True
-                
-                # Reset alerted jika can kembali terdeteksi setelah dropped
-                if can_data['state'] == STATE_DROPPED and frames_missing == 0:
-                    # Can kembali muncul setelah dropped, reset state untuk tracking ulang
-                    can_data['state'] = STATE_TRACKING
-                    can_data['alerted'] = False  # RESET FLAG
-                    can_data['first_seen_frame'] = self.frame_count  # Reset tracking duration
-                    self.log(f"Can #{can_id} recovered after drop (Y={can_data['cy']}px)", "WARNING")
-                
-                # ALERT: Can dropped dengan grace period
-                if can_data['state'] == STATE_TRACKING:
-                    if (use_missing_drop_alert and
-                        can_data['stable_frames'] >= STABLE_FRAMES_REQUIRED and
-                        tracking_duration >= MIN_TRACKING_DURATION and
-                        frames_missing > GRACE_PERIOD and
-                        not can_data['alerted']):
+                    # Skip yang sudah exiting (normal case)
+                    if can_data['state'] == STATE_EXITING:
+                        if frames_missing > MAX_MISSING_FRAMES:
+                            to_remove.append(can_id)
+                        continue
+                    
+                    # Update missing count untuk can yang sedang tracking
+                    if can_data['state'] == STATE_TRACKING and frames_missing > 0:
+                        if not can_data.get('was_missing', False):
+                            can_data['missing_count'] = can_data.get('missing_count', 0) + 1
+                            can_data['was_missing'] = True
+                    
+                    # Reset alerted jika can kembali terdeteksi setelah dropped
+                    if can_data['state'] == STATE_DROPPED and frames_missing == 0:
+                        # Can kembali muncul setelah dropped, reset state untuk tracking ulang
+                        can_data['state'] = STATE_TRACKING
+                        can_data['alerted'] = False  # RESET FLAG
+                        can_data['first_seen_frame'] = self.frame_count  # Reset tracking duration
+                        self.log(f"Can #{can_id} recovered after drop (Y={can_data['cy']}px)", "WARNING")
+                    
+                    # ALERT: Can dropped dengan grace period
+                    if can_data['state'] == STATE_TRACKING:
+                        if (use_missing_drop_alert and
+                            can_data['stable_frames'] >= STABLE_FRAMES_REQUIRED and
+                            tracking_duration >= MIN_TRACKING_DURATION and
+                            frames_missing > GRACE_PERIOD and
+                            not can_data['alerted']):
+                            
+                            video_time = f"{int(self.frame_count/self.fps//60):02d}:{int(self.frame_count/self.fps%60):02d}"
+                            alert_messages.append(
+                                f"🚨 ALERT: Can #{can_id} DROPPED at Y={can_data['cy']}px | "
+                                f"Missing: {frames_missing} frames ({frames_missing/self.fps:.1f}s) | "
+                                f"Frame: {self.frame_count} | Time: {video_time}"
+                            )
+                            tracked_cans_stateful[can_id]['state'] = STATE_DROPPED
+                            tracked_cans_stateful[can_id]['alerted'] = True
+                            total_dropped += 1
                         
-                        video_time = f"{int(self.frame_count/self.fps//60):02d}:{int(self.frame_count/self.fps%60):02d}"
-                        alert_messages.append(
-                            f"🚨 ALERT: Can #{can_id} DROPPED at Y={can_data['cy']}px | "
-                            f"Missing: {frames_missing} frames ({frames_missing/self.fps:.1f}s) | "
-                            f"Frame: {self.frame_count} | Time: {video_time}"
-                        )
-                        tracked_cans_stateful[can_id]['state'] = STATE_DROPPED
-                        tracked_cans_stateful[can_id]['alerted'] = True
-                        total_dropped += 1
+                        # Cleanup setelah grace period + buffer
+                        if frames_missing > GRACE_PERIOD + MAX_MISSING_FRAMES:
+                            to_remove.append(can_id)
                     
-                    # Cleanup setelah grace period + buffer
-                    if frames_missing > GRACE_PERIOD + MAX_MISSING_FRAMES:
+                    # Clean up entering cans yang hilang (probably false positive)
+                    elif can_data['state'] == STATE_ENTERING and frames_missing > MAX_MISSING_FRAMES:
+                        to_remove.append(can_id)
+                    
+                    # Clean up dropped cans yang tidak kembali dalam waktu lama
+                    elif can_data['state'] == STATE_DROPPED and frames_missing > GRACE_PERIOD * 2:
                         to_remove.append(can_id)
                 
-                # Clean up entering cans yang hilang (probably false positive)
-                elif can_data['state'] == STATE_ENTERING and frames_missing > MAX_MISSING_FRAMES:
-                    to_remove.append(can_id)
+                # Batch delete
+                for can_id in to_remove:
+                    del tracked_cans_stateful[can_id]
                 
-                # Clean up dropped cans yang tidak kembali dalam waktu lama
-                elif can_data['state'] == STATE_DROPPED and frames_missing > GRACE_PERIOD * 2:
-                    to_remove.append(can_id)
-            
-            # Batch delete
-            for can_id in to_remove:
-                del tracked_cans_stateful[can_id]
-            
+                # Count active cans (entering + tracking only)
+                active_cans = sum(1 for can in tracked_cans_stateful.values() 
+                                if can['state'] in [STATE_ENTERING, STATE_TRACKING] 
+                                and can['stable_frames'] >= STABLE_FRAMES_REQUIRED)
+            else:
+                # ✅ Mode fallen-only: hanya hitung deteksi, tidak tracking
+                active_cans = len(counted_centroids_list)
+                tracked_cans_stateful = {}  # Kosongkan untuk hemat memory
+
             # Batch logging
             if alert_messages:
                 for msg in alert_messages:
                     self.log(msg, "ALERT")
-            
-            # Count active cans (entering + tracking only)
-            active_cans = sum(1 for can in tracked_cans_stateful.values() 
-                            if can['state'] in [STATE_ENTERING, STATE_TRACKING] 
-                            and can['stable_frames'] >= STABLE_FRAMES_REQUIRED)
 
             # ============================================
             # VISUALIZATION with ROI lines
+            # ✅ PATCH: Optimasi visualisasi untuk mode fallen-only
             # ============================================
             current_time = time.time()
             should_update_display = (current_time - last_display_update) >= DISPLAY_UPDATE_INTERVAL
@@ -614,18 +632,28 @@ class CameraPanel:
             if should_update_display:
                 annotated = frame.copy()
                 
-                # Draw ROI lines
-                cv2.line(annotated, (0, ENTRY_LINE_Y), (frame_width, ENTRY_LINE_Y), (0, 255, 255), 2)  # Yellow: Entry
-                cv2.line(annotated, (0, EXIT_LINE_Y), (frame_width, EXIT_LINE_Y), (255, 0, 255), 2)    # Magenta: Exit
-                cv2.rectangle(annotated, (0, ACTIVE_ZONE_TOP), (frame_width, ACTIVE_ZONE_BOTTOM), (0, 255, 0), 2)  # Green: Active zone
+                # Draw ROI lines (tetap ditampilkan)
+                if TRACK_NORMAL_CANS:
+                    cv2.line(annotated, (0, ENTRY_LINE_Y), (frame_width, ENTRY_LINE_Y), (0, 255, 255), 2)  # Yellow: Entry
+                    cv2.line(annotated, (0, EXIT_LINE_Y), (frame_width, EXIT_LINE_Y), (255, 0, 255), 2)    # Magenta: Exit
+                    cv2.rectangle(annotated, (0, ACTIVE_ZONE_TOP), (frame_width, ACTIVE_ZONE_BOTTOM), (0, 255, 0), 2)  # Green: Active zone
+                    
+                    # Add ROI labels
+                    cv2.putText(annotated, "ENTRY LINE", (10, ENTRY_LINE_Y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                    cv2.putText(annotated, "EXIT LINE", (10, EXIT_LINE_Y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+                    cv2.putText(annotated, "ACTIVE ZONE", (frame_width - 150, ACTIVE_ZONE_TOP + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 
-                # Add ROI labels
-                cv2.putText(annotated, "ENTRY LINE", (10, ENTRY_LINE_Y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                cv2.putText(annotated, "EXIT LINE", (10, EXIT_LINE_Y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-                cv2.putText(annotated, "ACTIVE ZONE", (frame_width - 150, ACTIVE_ZONE_TOP + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                # ✅ PATCH: Filter visualisasi berdasarkan mode
+                if DISPLAY_NORMAL_CANS:
+                    # Mode normal: gambar semua
+                    detections_to_draw = all_detections
+                else:
+                    # Mode fallen-only: hanya gambar fallen cans
+                    detections_to_draw = [det for det in all_detections 
+                                         if det.get('label') == fallen_class_name]
                 
                 # Draw detections with state colors (tanpa teks ID)
-                for det in all_detections:
+                for det in detections_to_draw:
                     x1, y1, x2, y2 = det['bbox']
                     cx, cy = det['cx'], det['cy']
                     class_name = det.get('label')
@@ -633,36 +661,49 @@ class CameraPanel:
                     # Find if this detection is tracked
                     color = (0, 165, 255)  # Default: Orange (untracked)
                     is_tracking = False
+                    thickness = 1
 
                     # Fallen cans: selalu merah, tidak ikut state conveyor
                     if fallen_class_name and class_name == fallen_class_name:
-                        color = (0, 0, 255)
+                        color = (0, 0, 255)  # Merah untuk fallen
+                        thickness = 3  # ✅ Lebih tebal untuk highlight
                     else:
                         # Find if this detection is tracked sebagai cans biasa
-                        for can_id, can_data in tracked_cans_stateful.items():
-                            if abs(can_data['cx'] - cx) < 20 and abs(can_data['cy'] - cy) < 20:
-                                if can_data['state'] == STATE_ENTERING:
-                                    color = (255, 255, 0)  # Cyan: Entering
-                                elif can_data['state'] == STATE_TRACKING:
-                                    color = (0, 255, 0)  # Green: Tracking
-                                    is_tracking = True
-                                elif can_data['state'] == STATE_EXITING:
-                                    color = (255, 0, 255)  # Magenta: Exiting
-                                break
+                        if TRACK_NORMAL_CANS:  # ✅ Only check if tracking enabled
+                            for can_id, can_data in tracked_cans_stateful.items():
+                                if abs(can_data['cx'] - cx) < 20 and abs(can_data['cy'] - cy) < 20:
+                                    if can_data['state'] == STATE_ENTERING:
+                                        color = (255, 255, 0)  # Cyan: Entering
+                                    elif can_data['state'] == STATE_TRACKING:
+                                        color = (0, 255, 0)  # Green: Tracking
+                                        is_tracking = True
+                                    elif can_data['state'] == STATE_EXITING:
+                                        color = (255, 0, 255)  # Magenta: Exiting
+                                    break
                     
-                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 1)
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
                     
                     # Gambar titik kecil di tengah kaleng yang sedang di-track
                     if is_tracking:
                         cv2.circle(annotated, (cx, cy), 4, (0, 255, 0), -1)  # Titik hijau solid
                         cv2.circle(annotated, (cx, cy), 6, (255, 255, 255), 1)  # Border putih
 
-                # Info overlay (hanya statistik total)
+                # ✅ PATCH: Info overlay sesuai mode
                 video_time = f"{int(self.frame_count/self.fps//60):02d}:{int(self.frame_count/self.fps%60):02d}"
-                info_texts = [
-                    f'Frame: {self.frame_count} | Time: {video_time}',
-                    f'Active Cans: {active_cans}',
-                ]
+                
+                if TRACK_NORMAL_CANS:
+                    info_texts = [
+                        f'Frame: {self.frame_count} | Time: {video_time}',
+                        f'Active Cans: {active_cans}',
+                        f'Fallen: {len(fallen_tracks)} | Dropped: {total_dropped}',
+                    ]
+                else:
+                    # Mode fallen-only: info minimal
+                    info_texts = [
+                        f'Frame: {self.frame_count} | Time: {video_time}',
+                        f'🎯 FALLEN FOCUS MODE',
+                        f'Fallen: {len(fallen_tracks)} | Total Alerts: {total_dropped}',
+                    ]
                 
                 y_pos = 25
                 for text in info_texts:
@@ -710,12 +751,17 @@ class CameraPanel:
                 
                 if device == 'cuda' and torch.cuda.is_available():
                     mem_used = torch.cuda.memory_allocated(0) / 1024**3
-                    self.gpu_label.config(text=f"GPU: {mem_used:.2f}GB | Dropped: {total_dropped}")
+                    self.gpu_label.config(text=f"GPU: {mem_used:.2f}GB | Fallen: {len(fallen_tracks)} | Alerts: {total_dropped}")
                 else:
-                    self.gpu_label.config(text=f"CPU | Dropped: {total_dropped}")
+                    self.gpu_label.config(text=f"CPU | Fallen: {len(fallen_tracks)} | Alerts: {total_dropped}")
                 
                 self.fps_label.config(text=f"FPS: {fps_process:.1f}")
-                self.count_label.config(text=f"Active: {active_cans} | Drop: {total_dropped}")
+                
+                # ✅ PATCH: Status label sesuai mode
+                if TRACK_NORMAL_CANS:
+                    self.count_label.config(text=f"Active: {active_cans} | Fallen: {len(fallen_tracks)}")
+                else:
+                    self.count_label.config(text=f"🎯 Fallen: {len(fallen_tracks)} | Alerts: {total_dropped}")
 
         if self.cap:
             self.cap.release()
@@ -738,7 +784,7 @@ class ConfigDialog:
         self.callback = callback
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Konfigurasi Sistem")
-        self.dialog.geometry("400x500")
+        self.dialog.geometry("500x650")
         self.dialog.resizable(False, False)
         
         self.dialog.transient(parent)
@@ -747,55 +793,81 @@ class ConfigDialog:
         main_frame = ttk.Frame(self.dialog, padding=20)
         main_frame.pack(fill='both', expand=True)
         
+        # ✅ PATCH: Tambah config untuk mode optimasi
         configs = [
             ('Model Path:', 'model_path', current_config['model_path']),
             ('Class Name:', 'class_name', current_config['class_name']),
-            ('Fallen Class Name:', 'fallen_class_name', current_config.get('fallen_class_name', 'fallen_cans')),  
+            ('Fallen Class Name:', 'fallen_class_name', current_config.get('fallen_class_name', 'fallen_cans')),
+            
+            # ✅ BARU: Toggle untuk mode fokus fallen (0=False, 1=True)
+            ('─── OPTIMIZATION MODE ───', 'separator1', ''),
+            ('Track Normal Cans (0/1):', 'track_normal_cans', int(current_config.get('track_normal_cans', False))),
+            ('Display Normal Cans (0/1):', 'display_normal_cans', int(current_config.get('display_normal_cans', False))),
+            
+            ('─── DETECTION THRESHOLDS ───', 'separator2', ''),
             ('Conf Threshold:', 'conf_threshold', current_config['conf_threshold']),
             ('Count Conf Threshold:', 'count_conf_threshold', current_config['count_conf_threshold']),
             ('Fallen Conf Threshold:', 'fallen_conf_threshold', current_config.get('fallen_conf_threshold', 0.4)),
+            
+            ('─── TRACKING PARAMETERS ───', 'separator3', ''),
             ('Distance Threshold:', 'dist_threshold', current_config['dist_threshold']),
             ('Alert Cooldown (frames):', 'alert_cooldown_frames', current_config['alert_cooldown_frames']),
             ('Display Scale:', 'display_scale', current_config['display_scale']),
-            ('Debounce (frames):', 'debounce_frames', current_config.get('debounce_frames', 5)),  
+            ('Debounce (frames):', 'debounce_frames', current_config.get('debounce_frames', 5)),
             ('Lock Frames:', 'lock_frames', current_config.get('lock_frames', 2)), 
             ('Log Interval (frames):', 'log_interval_frames', current_config.get('log_interval_frames', 30)), 
-            ('Grace Period (frames):', 'grace_period_frames', current_config.get('grace_period_frames', 25)), 
+            ('Grace Period (frames):', 'grace_period_frames', current_config.get('grace_period_frames', 45)), 
             ('Min Tracking Duration:', 'min_tracking_duration', current_config.get('min_tracking_duration', 10)), 
-            ('Fallen Stable Frames:', 'fallen_stable_frames', current_config.get('fallen_stable_frames', 2)),      
+            ('Fallen Stable Frames:', 'fallen_stable_frames', current_config.get('fallen_stable_frames', 5)),
         ]
         
         self.vars = {}
-        for i, (label, key, value) in enumerate(configs):
-            ttk.Label(main_frame, text=label).grid(row=i, column=0, sticky='w', pady=5)
+        row_idx = 0
+        for label, key, value in configs:
+            # Skip separator display
+            if key.startswith('separator'):
+                ttk.Label(main_frame, text=label, font=('Arial', 9, 'bold'), foreground='blue').grid(
+                    row=row_idx, column=0, columnspan=2, sticky='w', pady=(10, 5)
+                )
+                row_idx += 1
+                continue
+                
+            ttk.Label(main_frame, text=label).grid(row=row_idx, column=0, sticky='w', pady=5)
             var = tk.StringVar(value=str(value))
             self.vars[key] = var
-            ttk.Entry(main_frame, textvariable=var, width=30).grid(row=i, column=1, pady=5)
+            ttk.Entry(main_frame, textvariable=var, width=30).grid(row=row_idx, column=1, pady=5)
+            row_idx += 1
         
         btn_frame = ttk.Frame(main_frame)
-        btn_frame.grid(row=len(configs), column=0, columnspan=2, pady=20)
+        btn_frame.grid(row=row_idx, column=0, columnspan=2, pady=20)
         
         ttk.Button(btn_frame, text="Simpan", command=self.save).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Batal", command=self.dialog.destroy).pack(side='left', padx=5)
     
     def save(self):
         try:
+            # ✅ PATCH: Tambah config baru
             new_config = {
                 'model_path': self.vars['model_path'].get(),
                 'class_name': self.vars['class_name'].get(),
-                'fallen_class_name': self.vars['fallen_class_name'].get(),                   
+                'fallen_class_name': self.vars['fallen_class_name'].get(),
+                
+                # ✅ BARU: Boolean dari integer input
+                'track_normal_cans': bool(int(self.vars['track_normal_cans'].get())),
+                'display_normal_cans': bool(int(self.vars['display_normal_cans'].get())),
+                
                 'conf_threshold': float(self.vars['conf_threshold'].get()),
                 'count_conf_threshold': float(self.vars['count_conf_threshold'].get()),
                 'fallen_conf_threshold': float(self.vars['fallen_conf_threshold'].get()),
                 'dist_threshold': int(self.vars['dist_threshold'].get()),
                 'alert_cooldown_frames': int(self.vars['alert_cooldown_frames'].get()),
                 'display_scale': float(self.vars['display_scale'].get()),
-                'debounce_frames': int(self.vars['debounce_frames'].get()),  
-                'lock_frames': int(self.vars['lock_frames'].get()),  
-                'log_interval_frames': int(self.vars['log_interval_frames'].get()),  
+                'debounce_frames': int(self.vars['debounce_frames'].get()),
+                'lock_frames': int(self.vars['lock_frames'].get()),
+                'log_interval_frames': int(self.vars['log_interval_frames'].get()),
                 'grace_period_frames': int(self.vars['grace_period_frames'].get()),
                 'min_tracking_duration': int(self.vars['min_tracking_duration'].get()),
-                'fallen_stable_frames': int(self.vars['fallen_stable_frames'].get()),       
+                'fallen_stable_frames': int(self.vars['fallen_stable_frames'].get()),
             }
             self.callback(new_config)
             self.dialog.destroy()
@@ -804,21 +876,28 @@ class ConfigDialog:
 
 
 class MainApp:
+    # ✅ PATCH: Update default config dengan mode optimasi
     config = {
-        'model_path': 'best.pt',
+        'model_path': 'fallen-full.pt',
         'class_name': 'cans',
-        'fallen_class_name': 'fallen_cans',  
+        'fallen_class_name': 'fallen_cans',
+        
+        # ✅ BARU: Mode optimasi (set False untuk fokus fallen only)
+        'track_normal_cans': False,  # ← UBAH KE False UNTUK PERFORMA MAKSIMAL
+        'display_normal_cans': False,  # ← UBAH KE False UNTUK TAMPILAN BERSIH
+        
         'conf_threshold': 0.4,
         'count_conf_threshold': 0.6,
+        'fallen_conf_threshold': 0.6,  # ← Turunkan jika perlu lebih sensitif
         'dist_threshold': 120,
         'alert_cooldown_frames': 30,
         'display_scale': 0.3,
         'debounce_frames': 15,
         'lock_frames': 5,
-        'log_interval_frames': 30,  # Log interval untuk menghindari spam (30 frames = ~1 detik)
-        'grace_period_frames': 25,  # Toleransi sebelum alert (25 frames = ~1 detik)
+        'log_interval_frames': 30,
+        'grace_period_frames': 45,
         'min_tracking_duration': 10, 
-        'fallen_stable_frames': 2,     
+        'fallen_stable_frames': 5,  # ← Bisa turunkan ke 1 untuk alert lebih cepat
     }
     
     def __init__(self, root):
@@ -838,8 +917,16 @@ class MainApp:
         header = ttk.Frame(root, padding=10)
         header.pack(fill='x')
         
-        ttk.Label(header, text="Nestle Can Detection System", 
+        ttk.Label(header, text="Aloka Can Detection System", 
                  font=('Arial', 16, 'bold')).pack(side='left')
+        
+        # ✅ PATCH: Tambah mode indicator di header
+        mode_text = "🎯 FALLEN FOCUS MODE" if not MainApp.config.get('track_normal_cans', True) else "📊 FULL TRACKING MODE"
+        mode_color = 'orange' if not MainApp.config.get('track_normal_cans', True) else 'blue'
+        self.mode_label = ttk.Label(header, 
+            text=mode_text, 
+            foreground=mode_color, font=('Arial', 10, 'bold'))
+        self.mode_label.pack(side='left', padx=20)
         
         # Device info di header
         if torch.cuda.is_available():
@@ -857,6 +944,7 @@ class MainApp:
         
         ttk.Button(header, text="⚙ Configure", command=self.open_config).pack(side='right', padx=5)
         ttk.Button(header, text="🗑️ Clear Logs", command=self.clear_logs).pack(side='right', padx=5)
+        
         # Main content
         main_content = ttk.PanedWindow(root, orient='horizontal')
         main_content.pack(fill='both', expand=True, padx=10, pady=10)
@@ -923,7 +1011,11 @@ class MainApp:
                                      relief='sunken', anchor='w')
         self.status_label.pack(fill='x', side='bottom')
         
-        self.add_log("System initialized with CUDA optimization", "SUCCESS")
+        # ✅ PATCH: Log mode info saat startup
+        if not MainApp.config.get('track_normal_cans', True):
+            self.add_log("🎯 System initialized in FALLEN FOCUS MODE (optimized)", "SUCCESS")
+        else:
+            self.add_log("📊 System initialized in FULL TRACKING MODE", "SUCCESS")
         
         self.load_cameras()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -990,14 +1082,22 @@ class MainApp:
         CameraPanel.app_config = new_config
         with open('can_detection_config.json', 'w') as f:
             json.dump(new_config, f, indent=2)
-        messagebox.showinfo("Success", "Konfigurasi berhasil disimpan!")
+        
+        # ✅ PATCH: Update mode indicator di header
+        mode_text = "🎯 FALLEN FOCUS MODE" if not new_config.get('track_normal_cans', True) else "📊 FULL TRACKING MODE"
+        mode_color = 'orange' if not new_config.get('track_normal_cans', True) else 'blue'
+        self.mode_label.config(text=mode_text, foreground=mode_color)
+        
+        messagebox.showinfo("Success", "Konfigurasi berhasil disimpan!\n\nRestart camera untuk apply perubahan mode.")
         self.add_log("Configuration updated", "SUCCESS")
     
     def load_config(self):
         if os.path.exists('can_detection_config.json'):
             try:
                 with open('can_detection_config.json', 'r') as f:
-                    MainApp.config = json.load(f)
+                    loaded_config = json.load(f)
+                    # ✅ Merge dengan default config untuk backward compatibility
+                    MainApp.config.update(loaded_config)
             except Exception as e:
                 print(f"Error loading config: {e}")
     
