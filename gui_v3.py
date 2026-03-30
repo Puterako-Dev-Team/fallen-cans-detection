@@ -14,30 +14,28 @@ import time
 import numpy as np
 
 class ModelManager:
-    """Singleton untuk manage shared YOLO model"""
-    _instance = None
-    _model = None
+    """Manager untuk YOLO models per camera menghindari thread-lock contention"""
+    _models = {}
     _lock = threading.Lock()
     _device = None
     
     @classmethod
-    def get_model(cls, model_path):
-        if cls._model is None:
-            with cls._lock:
-                if cls._model is None:  # Double-check
-                    print(f"🔄 Loading model: {model_path}")
-                    cls._model = YOLO(model_path)
+    def get_model(cls, model_path, camera_id="default"):
+        with cls._lock:
+            if camera_id not in cls._models:
+                print(f"🔄 Loading model for Camera {camera_id}: {model_path}")
+                new_model = YOLO(model_path)
+                
+                if torch.cuda.is_available():
+                    cls._device = 'cuda'
+                    new_model.to('cuda')
+                    print(f"✅ Model Camera {camera_id} loaded to CUDA")
+                else:
+                    cls._device = 'cpu'
+                    print("⚠️ CUDA tidak tersedia")
                     
-                    # Tentukan device: CUDA jika tersedia, CPU jika tidak
-                    if torch.cuda.is_available():
-                        cls._device = 'cuda'
-                        cls._model.to('cuda')
-                        print(f"✅ Model loaded to CUDA (GPU: {torch.cuda.get_device_name(0)})")
-                        print(f"📊 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-                    else:
-                        cls._device = 'cpu'
-                        print("⚠️ CUDA tidak tersedia, menggunakan CPU (performa lebih rendah)")
-        return cls._model
+                cls._models[camera_id] = new_model
+        return cls._models[camera_id]
     
     @classmethod
     def get_device(cls):
@@ -45,16 +43,11 @@ class ModelManager:
         return cls._device if cls._device else ('cuda' if torch.cuda.is_available() else 'cpu')
     
     @classmethod
-    def predict_batch(cls, frames, conf_threshold):
-        """Batch prediction untuk multiple frames"""
+    def remove_model(cls, camera_id):
         with cls._lock:
-            if cls._model is None:
-                return []
-            # Process semua frames sekaligus (batch processing)
-            # Gunakan half precision hanya untuk CUDA
-            use_half = cls._device == 'cuda'
-            results = cls._model(frames, conf=conf_threshold, verbose=False, stream=False, half=use_half)
-            return results
+            if camera_id in cls._models:
+                del cls._models[camera_id]
+                cls.clear_cache()
 
     @classmethod
     def clear_cache(cls):
@@ -193,10 +186,10 @@ class CameraPanel:
 
         # Load shared model
         try:
-            model = ModelManager.get_model(config['model_path'])
+            model = ModelManager.get_model(config['model_path'], self.camera_id)
             device = ModelManager.get_device()
             if device == 'cuda':
-                self.log("Using shared CUDA model", "SUCCESS")
+                self.log(f"Using dedicated CUDA model GPU for Camera {self.camera_id}", "SUCCESS")
             else:
                 self.log("Using CPU model (slower)", "WARNING")
         except Exception as e:
@@ -749,10 +742,16 @@ class CameraPanel:
                 
                 frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(frame_rgb)
-                photo = ImageTk.PhotoImage(image=img)
                 
-                self.video_label.configure(image=photo, text='')
-                self.video_label.image = photo
+                def _update_ui(img_ref=img):
+                    try:
+                        photo = ImageTk.PhotoImage(image=img_ref)
+                        self.video_label.configure(image=photo, text='')
+                        self.video_label.image = photo
+                    except Exception:
+                        pass
+                        
+                self.video_label.after(0, _update_ui)
                 
                 last_display_update = current_time
             
@@ -769,17 +768,27 @@ class CameraPanel:
                 
                 if device == 'cuda' and torch.cuda.is_available():
                     mem_used = torch.cuda.memory_allocated(0) / 1024**3
-                    self.gpu_label.config(text=f"GPU: {mem_used:.2f}GB | Dropped: {total_dropped}")
+                    g_txt = f"GPU: {mem_used:.2f}GB | Dropped: {total_dropped}"
                 else:
-                    self.gpu_label.config(text=f"CPU | Dropped: {total_dropped}")
+                    g_txt = f"CPU | Dropped: {total_dropped}"
                 
-                self.fps_label.config(text=f"FPS: {fps_process:.1f}")
-                self.count_label.config(text=f"Active: {active_cans} | Drop: {total_dropped}")
+                f_txt = f"FPS: {fps_process:.1f}"
+                c_txt = f"Active: {active_cans} | Drop: {total_dropped}"
+                
+                def _update_stats(g=g_txt, f=f_txt, c=c_txt):
+                    try:
+                        self.gpu_label.config(text=g)
+                        self.fps_label.config(text=f)
+                        self.count_label.config(text=c)
+                    except Exception:
+                        pass
+                
+                self.gpu_label.after(0, _update_stats)
 
         if self.cap:
             self.cap.release()
         self.is_running = False
-        ModelManager.clear_cache()
+        ModelManager.remove_model(self.camera_id)
         self.log(f"Detection stopped | Final stats: Entered={total_entered}, Exited={total_exited}, Dropped={total_dropped}", "INFO")
 
     def get_config(self):
